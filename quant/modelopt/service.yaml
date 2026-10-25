@@ -1,0 +1,59 @@
+# One-off quantization service: runs job.sh (ModelOpt 0.47, mo.py) on one whole RTX PRO 6000 and
+# writes each variant to gs://BUCKET/nanbeige43/q/<NAME>. A Cloud Run service rather than a job,
+# because Cloud Run caps GPU jobs at one hour. Delete it when the variants are uploaded.
+# job.sh, mo.py, gcsul.py and the calibration parquet go to gs://BUCKET/nanbeige43/q/job/ first.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: nanbeige43-quant
+  labels:
+    cloud.googleapis.com/location: us-central1
+  annotations:
+    run.googleapis.com/ingress: internal
+    run.googleapis.com/launch-stage: ALPHA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: '1'
+        autoscaling.knative.dev/minScale: '1'
+        run.googleapis.com/cpu-throttling: 'false'
+        run.googleapis.com/gpu-zonal-redundancy-disabled: 'true'
+    spec:
+      serviceAccountName: SERVICE_ACCOUNT@PROJECT.iam.gserviceaccount.com
+      timeoutSeconds: 300
+      containers:
+      - image: REGION-docker.pkg.dev/PROJECT/sglang/nanbeige43-sglang:v0.5.22-patched3
+        command: [bash, -c]
+        args:
+        - "python3 -m http.server 8080 >/dev/null 2>&1 & bash /gcs/nanbeige43/q/job/job.sh; echo EXIT $?; sleep infinity"
+        env:
+        - name: BUCKET
+          value: BUCKET
+        # The BF16 source is 66 GB and /tmp is in memory on Cloud Run: 66 GB of source, about 22 GB
+        # of export and the process fit in 120 GiB.
+        - name: VARIANTS
+          value: 'NAME=molh ALGO=local_hessian HEAD=nvfp4 BH=0 SENS=0 EXPORT=1 NCAL=583 SEQ=4096 KV=fp8;NAME=fp8 ALGO=max HEAD=bf16 BH=0 SENS=0 EXPORT=1 NCAL=583 SEQ=4096 KV=fp8 EXCL_FP8=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51'
+        ports:
+        - containerPort: 8080
+        resources:
+          limits:
+            cpu: '30'
+            memory: 120Gi
+            nvidia.com/gpu: '1'
+        startupProbe:
+          tcpSocket:
+            port: 8080
+          periodSeconds: 10
+          failureThreshold: 30
+        volumeMounts:
+        - name: gcs
+          mountPath: /gcs
+      volumes:
+      - name: gcs
+        csi:
+          driver: gcsfuse.run.googleapis.com
+          volumeAttributes:
+            bucketName: BUCKET
+      nodeSelector:
+        run.googleapis.com/accelerator: nvidia-rtx-pro-6000

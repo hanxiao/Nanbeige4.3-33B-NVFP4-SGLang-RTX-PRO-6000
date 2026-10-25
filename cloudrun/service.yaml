@@ -1,0 +1,155 @@
+# Nanbeige/Nanbeige4.3-33B in our own NVFP4/FP8 quantization (ModelOpt 0.47, quant/modelopt/: FP8
+# W8A8 attention, NVFP4 MLP weights and lm_head served as W4A16 on Marlin), FP8 KV cache, n-gram
+# speculative decoding, on one whole NVIDIA RTX PRO 6000, served by SGLang v0.5.22 with four patches.
+# Production since 2026-10-25: service nanbeige43-33b, eight slots.
+# Applied with `gcloud run services replace` (the yaml declares the ALPHA launch stage).
+#
+# `services replace` is used rather than `run deploy --args=...` because that flag splits on
+# commas and several values here contain them. It also resets anything set imperatively with
+# `services update`.
+#
+# Reachable from the internet (roles/run.invoker for allUsers), gated by SGLang's own bearer token,
+# which comes from Secret Manager. SGLang runs no server-side tools: a caller with the key can spend
+# GPU and read the model, nothing else.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: nanbeige43-33b
+  labels:
+    cloud.googleapis.com/location: REGION
+  annotations:
+    # Cloud Run accepts 80 GiB with 20 vCPU on the whole card only for this launch stage here.
+    run.googleapis.com/launch-stage: ALPHA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: '1'
+        # One warm instance: a cold start is about 12 minutes (23 GB of weights from the bucket at
+        # ~55 MB/s, then the KV pool, autotune and CUDA graphs).
+        autoscaling.knative.dev/minScale: '1'
+        run.googleapis.com/cpu-throttling: 'false'
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/startup-cpu-boost: 'true'
+        # Mandatory for Cloud Run GPUs in this preview; without it the deploy hangs or fails on quota.
+        run.googleapis.com/gpu-zonal-redundancy-disabled: 'true'
+    spec:
+      # Two requests per slot (8 slots): requests 9 to 16 queue inside SGLang, where the prefix
+      # cache and the admission order live, and Cloud Run returns 429 only beyond 16.
+      containerConcurrency: 16
+      # Cloud Run's maximum. An agent turn that writes a long file in one tool call can run for
+      # many minutes.
+      timeoutSeconds: 3600
+      serviceAccountName: SERVICE_ACCOUNT@PROJECT.iam.gserviceaccount.com
+      nodeSelector:
+        run.googleapis.com/accelerator: nvidia-rtx-pro-6000
+      containers:
+        # lmsysorg/sglang:v0.5.22 with four patches and Granian, built by docker/build.sh. The
+        # deployed revision used this tag at
+        # sha256:8f3ab321baa343a3e6320773d322ff302719ca66c91d36eca5b61a8ebaf22525.
+        - image: REGION-docker.pkg.dev/PROJECT/sglang/nanbeige43-sglang:v0.5.22-patched4
+          # h2c: Cloud Run speaks HTTP/2 to the container (Granian, --enable-http2), so a client that
+          # hangs up reaches SGLang as a stream reset and its request is aborted at once.
+          ports:
+            - name: h2c
+              containerPort: 8080
+          # The weights are nanbeige43/q/molh-w4m: the ModelOpt export nanbeige43/q/molh with three
+          # config-only edits baked in (cloudrun/prep.py gen,w4h,w4mlp):
+          #   - the NVFP4 MLPs and lm_head are served as W4A16_NVFP4 (NVFP4 weights, BF16
+          #     activations, Marlin). Served as NVFP4 W4A4 the same weights give KL 0.122 to BF16;
+          #     as W4A16 0.080, at the same decode speed (62.2 against 63.6 tok/s) and about half
+          #     the prefill speed;
+          #   - generation_config.json carries Nanbeige's agentic sampling (temperature 1.0,
+          #     top_p 0.95), which --sampling-defaults=model applies to requests that send none;
+          #   - the FP8 KV scales that ModelOpt calibrated stay in, for --kv-cache-dtype=fp8_e4m3.
+          #     With a BF16 KV cache, strip them first (prep.py stripkv): a ModelOpt checkpoint that
+          #     keeps them produces garbage with a BF16 cache.
+          #
+          # --kv-cache-dtype=fp8_e4m3: this model has full attention in all 52 layers (8 KV heads of
+          # 128), so at long context decode reads more KV than weights. FP8 KV halves that: one
+          # stream at 60k tokens decodes at 47.0 tok/s against 41.1 with BF16 KV (without n-gram),
+          # and the pool doubles from 296,907 to 593,794 tokens. Short-context decode loses 4%
+          # (59.8 against 62.2 in bench2). Needle 5/5 at 30k and 121k and math 12/12 are unchanged.
+          #
+          # --context-length=262144: the pool holds two full-length requests or about four 120k-token
+          # agent runs. The pool also fits the model's full 524,288 tokens (max_req_input_len
+          # 524,282 was measured with --context-length=524288); raise it if a client needs it.
+          #
+          # --speculative-algorithm=NGRAM, 8 draft tokens: no drafter exists for this model (no
+          # EAGLE, DFlash or MTP head on Hugging Face as of 2026-10-25), so drafts come from n-grams
+          # of the prompt and earlier output. A coding agent copies a lot from its context: one
+          # stream decodes 71.3 / 69.4 tok/s at 30k / 60k tokens against 52.5 / 47.0 without it, and
+          # prose is unchanged. NGRAM turns off mixed chunked prefill.
+          #
+          # --mem-fraction-static=0.86 leaves 10.5 GB free after startup, enough for a /generate
+          # with full-prompt top-20 logprobs over this 166,912-token vocabulary (scripts/fid.py).
+          #
+          # --max-running-requests=8 and --cuda-graph-max-bs-decode=8: eight slots, Han's standard.
+          # --chunked-prefill-size=8192 and --max-prefill-tokens=8192 as on the Qwen service.
+          #
+          # The model comes from the bucket (cloudrun/gcsdl.py, parallel ranged downloads to local
+          # disk) before SGLang starts; the service account needs read access to the bucket.
+          #
+          # Run through a shell so "$SGLANG_API_KEY" expands: Knative does not substitute $(VAR) in
+          # args. The key stays in Secret Manager; this file never contains it.
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              pip install -q 'google-cloud-storage==3.17.1' &&
+              python3 /gcs/gcsdl.py BUCKET nanbeige43/q/molh-w4m=/tmp/model &&
+              exec python3 -m sglang.launch_server
+              --model-path=/tmp/model
+              --served-model-name=Nanbeige4.3-33B
+              --host=0.0.0.0
+              --port=8080
+              --mem-fraction-static=0.86
+              --context-length=262144
+              --kv-cache-dtype=fp8_e4m3
+              --attention-backend=flashinfer
+              --chunked-prefill-size=8192
+              --max-prefill-tokens=8192
+              --max-running-requests=8
+              --cuda-graph-max-bs-decode=8
+              --speculative-algorithm=NGRAM
+              --speculative-num-draft-tokens=8
+              --reasoning-parser=qwen3
+              --tool-call-parser=qwen3_coder
+              --sampling-defaults=model
+              --enable-metrics
+              --enable-cache-report
+              --enable-http2
+              --api-key "$SGLANG_API_KEY"
+          env:
+            - name: SGLANG_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: NANBEIGE43_API_KEY
+                  key: latest
+          volumeMounts:
+            - name: weights
+              mountPath: /gcs
+              readOnly: true
+          resources:
+            limits:
+              cpu: '20'
+              memory: 80Gi
+              nvidia.com/gpu: '1'
+          startupProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 240
+            periodSeconds: 60
+            failureThreshold: 40
+            timeoutSeconds: 30
+      volumes:
+        - name: weights
+          csi:
+            driver: gcsfuse.run.googleapis.com
+            readOnly: true
+            volumeAttributes:
+              bucketName: BUCKET
+  traffic:
+    - percent: 100
+      latestRevision: true
