@@ -5,9 +5,9 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: nanbeige43-quant
+  name: QUANT_SERVICE
   labels:
-    cloud.googleapis.com/location: us-central1
+    cloud.googleapis.com/location: REGION
   annotations:
     run.googleapis.com/ingress: internal
     run.googleapis.com/launch-stage: ALPHA
@@ -23,7 +23,7 @@ spec:
       serviceAccountName: SERVICE_ACCOUNT@PROJECT.iam.gserviceaccount.com
       timeoutSeconds: 300
       containers:
-      - image: REGION-docker.pkg.dev/PROJECT/sglang/nanbeige43-sglang:v0.5.22-patched3
+      - image: REGION-docker.pkg.dev/PROJECT/REPO/nanbeige43-sglang:v0.5.22-patched3
         command: [bash, -c]
         args:
         - "python3 -m http.server 8080 >/dev/null 2>&1 & bash /gcs/nanbeige43/q/job/job.sh; echo EXIT $?; sleep infinity"

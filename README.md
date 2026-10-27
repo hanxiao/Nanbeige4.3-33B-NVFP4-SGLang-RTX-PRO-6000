@@ -25,18 +25,18 @@ NVIDIA ModelOpt and serve it with SGLang v0.5.22. The process, scripts and quali
 | Cold start | about 12 minutes from instance start to ready; one instance stays warm |
 
 All figures were measured on 2026-10-25. The production rows come from the production revision
-`nanbeige43-33b-00001-sdn` itself, before any client used it. The comparison rows come from test
+itself, before any client used it. The comparison rows come from test
 services with the same image and flags except where a row says otherwise.
 
 ```bash
 bash docker/build.sh                                            # lmsysorg/sglang:v0.5.22 + four patches, into Artifact Registry
 gcloud run services replace quant/modelopt/service.yaml         # once: quantize into the bucket (ModelOpt), then delete it
 gcloud run services replace cloudrun/service.yaml
-gcloud run services add-iam-policy-binding nanbeige43-33b --member=allUsers --role=roles/run.invoker
+gcloud run services add-iam-policy-binding SERVICE --member=allUsers --role=roles/run.invoker
 ```
 
-Fill in `REGION`, `PROJECT`, `BUCKET` and `SERVICE_ACCOUNT` first. The service reads its bearer token
-from the Secret Manager secret `NANBEIGE43_API_KEY`.
+Fill in `REGION`, `PROJECT`, `REPO`, `SERVICE`, `QUANT_SERVICE`, `BUCKET`, `SERVICE_ACCOUNT` and `API_KEY_SECRET` first. The service reads its bearer token
+from the Secret Manager secret `API_KEY_SECRET`.
 
 ## Results
 
@@ -168,8 +168,8 @@ own (a Chinese identity prompt, or a tool-calling prompt when tools are given).
 
 ## Production, 2026-10-25
 
-The service `nanbeige43-33b` in us-central1 is new; nothing else moved. Revision
-`nanbeige43-33b-00001-sdn` serves `cloudrun/service.yaml`. We ran every check against it right
+The service `SERVICE` is new; nothing else moved. Its first revision
+serves `cloudrun/service.yaml`. We ran every check against it right
 after it came up:
 
 | Check | Result |
@@ -209,7 +209,7 @@ services are deleted.
 ### Client configuration
 
 An Anthropic-style client points at the service URL with the bearer token from
-`NANBEIGE43_API_KEY`, model `Nanbeige4.3-33B`, context 262,138 input tokens (SGLang's
+`API_KEY_SECRET`, model `Nanbeige4.3-33B`, context 262,138 input tokens (SGLang's
 `max_req_input_len`), reasoning on. SGLang returns 400 when the prompt plus `max_tokens` exceeds
 the context, so clients cap the completion below the window (the model card suggests 65,536 for
 agentic work).

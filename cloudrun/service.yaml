@@ -1,7 +1,7 @@
 # Nanbeige/Nanbeige4.3-33B in our own NVFP4/FP8 quantization (ModelOpt 0.47, quant/modelopt/: FP8
 # W8A8 attention, NVFP4 MLP weights and lm_head served as W4A16 on Marlin), FP8 KV cache, n-gram
 # speculative decoding, on one whole NVIDIA RTX PRO 6000, served by SGLang v0.5.22 with four patches.
-# Production since 2026-10-25: service nanbeige43-33b, eight slots.
+# Production since 2026-10-25: service SERVICE, eight slots.
 # Applied with `gcloud run services replace` (the yaml declares the ALPHA launch stage).
 #
 # `services replace` is used rather than `run deploy --args=...` because that flag splits on
@@ -14,7 +14,7 @@
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: nanbeige43-33b
+  name: SERVICE
   labels:
     cloud.googleapis.com/location: REGION
   annotations:
@@ -45,9 +45,8 @@ spec:
         run.googleapis.com/accelerator: nvidia-rtx-pro-6000
       containers:
         # lmsysorg/sglang:v0.5.22 with four patches and Granian, built by docker/build.sh. The
-        # deployed revision used this tag at
-        # sha256:8f3ab321baa343a3e6320773d322ff302719ca66c91d36eca5b61a8ebaf22525.
-        - image: REGION-docker.pkg.dev/PROJECT/sglang/nanbeige43-sglang:v0.5.22-patched4
+        # deployed revision pinned this tag by digest.
+        - image: REGION-docker.pkg.dev/PROJECT/REPO/nanbeige43-sglang:v0.5.22-patched4
           # h2c: Cloud Run speaks HTTP/2 to the container (Granian, --enable-http2), so a client that
           # hangs up reaches SGLang as a stream reset and its request is aborted at once.
           ports:
@@ -125,7 +124,7 @@ spec:
             - name: SGLANG_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: NANBEIGE43_API_KEY
+                  name: API_KEY_SECRET
                   key: latest
           volumeMounts:
             - name: weights
